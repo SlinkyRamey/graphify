@@ -56,6 +56,8 @@ from graphify.extractors.ocaml import extract_ocaml  # noqa: F401
 from graphify.extractors.pascal_forms import extract_delphi_form, extract_lazarus_form  # noqa: F401
 from graphify.extractors.powershell import extract_powershell, extract_powershell_manifest  # noqa: F401
 from graphify.extractors.r import extract_r, resolve_r_sourced_calls  # noqa: F401
+from graphify.extractors.qml import extract_qml  # noqa: F401
+from graphify.extractors.qml_metadata import extract_qmldir  # noqa: F401
 from graphify.extractors.razor import extract_razor  # noqa: F401
 from graphify.extractors.robot import extract_robot  # noqa: F401
 from graphify.extractors.rust import extract_rust  # noqa: F401
@@ -187,7 +189,7 @@ def _safe_extract(
     extractor: Callable, path: Path, *, scan_root: Path | None = None
 ) -> dict:
     try:
-        if extractor is extract_python:
+        if extractor in (extract_python, extract_qml, extract_qmldir):
             return extractor(path, root=scan_root)
         return extractor(path)
     except RecursionError:
@@ -3132,6 +3134,7 @@ def _lang_is_case_insensitive(source_file: object) -> bool:
 # Extensions absent from this map (docs, configs, unknown languages) resolve to
 # no family and are never filtered — same permissive default as before.
 _LANG_FAMILY_BY_EXT: dict[str, str] = {
+    ".qml": "qml",
     # JS/TS module graph (SFCs embed JS/TS)
     ".js": "jsts", ".jsx": "jsts", ".mjs": "jsts", ".cjs": "jsts",
     ".ts": "jsts", ".tsx": "jsts", ".mts": "jsts", ".cts": "jsts",
@@ -6707,6 +6710,7 @@ def extract_xaml(path: Path) -> dict:
 
 
 _DISPATCH: dict[str, Any] = {
+    ".qml": extract_qml,
     ".py": extract_python,
     ".js": extract_js,
     ".jsx": extract_js,
@@ -6828,6 +6832,7 @@ _DISPATCH: dict[str, Any] = {
 # rather than falling back like Pascal does. Used by the #1745 warning in
 # extract() to tell the user which extra restores the language.
 _EXTRA_FOR_EXTENSION = {
+    ".qml": "qml",
     ".vb": "vbnet",
     ".r": "r",
     ".sol": "solidity",
@@ -6958,6 +6963,8 @@ def _is_cpp_header(path: Path) -> bool:
 
 def _get_extractor(path: Path) -> Any | None:
     """Return the correct extractor function for a file, or None if unsupported."""
+    if path.name == "qmldir":
+        return extract_qmldir
     if path.name.lower().endswith(".blade.php"):
         return extract_blade
     # MCP config files (.mcp.json, claude_desktop_config.json, ...) are routed
@@ -7036,7 +7043,7 @@ def _extract_single_file(args: tuple) -> tuple[int, dict]:
     root = Path(root_str)
     cache_location = Path(cache_location_str)
     _raise_recursion_limit()
-    bypass_cache = path.suffix in _JS_CACHE_BYPASS_SUFFIXES
+    bypass_cache = path.suffix in _JS_CACHE_BYPASS_SUFFIXES or (path.suffix.lower() == ".qml" or path.name == "qmldir")
 
     # Check cache first (avoid re-extraction)
     if not bypass_cache:
@@ -7255,7 +7262,7 @@ def _extract_sequential(
         if extractor is None:
             per_file[idx] = {"nodes": [], "edges": []}
             continue
-        bypass_cache = path.suffix in _JS_CACHE_BYPASS_SUFFIXES
+        bypass_cache = path.suffix in _JS_CACHE_BYPASS_SUFFIXES or (path.suffix.lower() == ".qml" or path.name == "qmldir")
         # XAML boundary anchors on `root` (the corpus), not the cache location.
         result = _safe_extract_with_xaml_root(extractor, path, root)
         # See _extract_single_file: don't cache an anomalous zero-node result (#1666),
@@ -7408,7 +7415,7 @@ def extract(
         if _get_extractor(path) is None:
             per_file[i] = {"nodes": [], "edges": []}
             continue
-        bypass_cache = path.suffix in _JS_CACHE_BYPASS_SUFFIXES
+        bypass_cache = path.suffix in _JS_CACHE_BYPASS_SUFFIXES or (path.suffix.lower() == ".qml" or path.name == "qmldir")
         if not bypass_cache:
             cached = load_cached(path, root, cache_root=cache_location)
             if cached is not None:
@@ -7462,6 +7469,11 @@ def extract(
                 "nodes": [], "edges": [],
                 "error": "internal: no extraction result produced",
             }
+
+    # Overlay only already-admitted JavaScript resources referenced by QML.
+    # Its facts are separate from the generic JS graph and never execute source.
+    from graphify.extractors.qml_scripts import collect_qml_scripts
+    collect_qml_scripts(paths, per_file, root=root)
 
     # #1666: surface any source file an extractor accepted but that produced zero
     # nodes (not even a file node). Such a file is silently absent from the graph,
@@ -8244,6 +8256,11 @@ def extract(
     for n in resolution_nodes:
         if n.get("file_type") == "rationale" or n.get("type") == "namespace":
             continue
+        # Dedicated QML scopes resolve these facts; shared label guessing must
+        # not bind generic language calls to QML declarations or source sites.
+        _qml_metadata = n.get("metadata", {}).get("qml", {})
+        if _qml_metadata.get("contract_version") == 1:
+            continue
         raw = n.get("label", "")
         normalised = raw.strip("()").lstrip(".")
         if normalised:
@@ -8661,6 +8678,33 @@ def extract(
     else:
         run_language_resolvers(paths, per_file, all_nodes, all_edges)
 
+    # QML joins use accepted facts only and never mutate borrowed context nodes.
+    from graphify.qml_resolution import resolve_qml_project
+    if any(n.get("metadata", {}).get("qml") for n in all_nodes):
+        fresh_ids = {n["id"] for n in all_nodes}
+        joined_nodes = all_nodes + [n for n in resolution_context_nodes or []
+                                   if n.get("id") not in fresh_ids]
+        joined_edges = all_edges + list(resolution_context_edges or [])
+        node_count, edge_count = len(joined_nodes), len(joined_edges)
+        try:
+            resolve_qml_project(dict(zip(paths, per_file)), joined_nodes, joined_edges, root=root)
+            from graphify.qml_relationships import resolve_qml_relationships
+            resolve_qml_relationships(dict(zip(paths, per_file)), joined_nodes, joined_edges, root=root)
+        except Exception:
+            # A broken join must not pass the normal warning-and-continue path.
+            for path, result in zip(paths, per_file):
+                if result and ((path.suffix.lower() == ".qml" or path.name == "qmldir") or path.name == "qmldir"):
+                    relative = path.resolve().relative_to(root).as_posix()
+                    result.setdefault("qml_failures", []).append({"code": "QML_RESOLUTION_FAILED", "source_file": relative})
+                    result.setdefault("diagnostics", []).append({"code": "QML_RESOLUTION_FAILED", "severity": "error",
+                        "owner": "qml_resolution", "source_file": relative, "message": "QML project join failed",
+                        "recovery": "Correct the join failure and retry; prior graph is preserved."})
+                    if str(path) not in _failed_sources:
+                        _failed_sources.append(str(path))
+        else:
+            all_nodes.extend(joined_nodes[node_count:])
+            all_edges.extend(joined_edges[edge_count:])
+
     # Relativize source_file fields so paths are portable across machines (#555).
     # When the node's id was itself minted from the absolute path, remap it to a
     # portable id and rewrite the edge endpoints that reference it.
@@ -8861,6 +8905,10 @@ def extract(
         # manifest does not freeze them as processed (#2543). Callers that
         # only read nodes/edges ignore this key.
         "failed_sources": _failed_sources,
+        "qml_failures": [failure for result in per_file if result
+                         for failure in result.get("qml_failures", [])],
+        "diagnostics": [diagnostic for result in per_file if result
+                        for diagnostic in result.get("diagnostics", [])],
         # Surfaces the actual dispatched source paths so build_merge /
         # merge_raw_extraction know which files were genuinely re-extracted
         # rather than guessing ownership from node["source_file"] (#3411).
@@ -8872,6 +8920,12 @@ def collect_files(target: Path, *, follow_symlinks: bool = False, root: Path | N
     containment_root = root if root is not None else target
     from graphify.detect import _resolves_under_root
     if target.is_file():
+        if target.name == "qmldir" or target.suffix.lower() == ".qml":
+            from graphify.detect import _is_ignored, _load_graphifyignore
+            ignore_root = root if root is not None else target.parent
+            patterns = _load_graphifyignore(ignore_root)
+            if patterns and _is_ignored(target, ignore_root, patterns):
+                return []
         return [target] if _resolves_under_root(target, containment_root) else []
     _EXTENSIONS = set(_DISPATCH.keys())
     from graphify.detect import _is_ignored, _is_noise_dir, _load_graphifyignore
@@ -8904,7 +8958,7 @@ def collect_files(target: Path, *, follow_symlinks: bool = False, root: Path | N
             for fname in filenames:
                 p = dp / fname
                 suffix = p.suffix
-                if (suffix in _EXTENSIONS or suffix.lower() in _EXTENSIONS) and not _ignored(p) and _resolves_under_root(p, containment_root):
+                if (suffix in _EXTENSIONS or suffix.lower() in _EXTENSIONS or p.name == "qmldir") and not _ignored(p) and _resolves_under_root(p, containment_root):
                     results.append(p)
         return sorted(results)
     # Walk with symlink following + cycle detection
@@ -8925,7 +8979,7 @@ def collect_files(target: Path, *, follow_symlinks: bool = False, root: Path | N
         for fname in filenames:
             p = dp / fname
             suffix = p.suffix
-            if (suffix in _EXTENSIONS or suffix.lower() in _EXTENSIONS) and not _ignored(p) and _resolves_under_root(p, containment_root):
+            if (suffix in _EXTENSIONS or suffix.lower() in _EXTENSIONS or p.name == "qmldir") and not _ignored(p) and _resolves_under_root(p, containment_root):
                 results.append(p)
     return sorted(results)
 
