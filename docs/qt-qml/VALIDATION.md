@@ -285,3 +285,118 @@ Qt policy/state/project/resolver typing reports0errors0warnings; whole Ruff pass
 The last broad regression1001 passed28skipped, with corrected helper invocation
 and the two established Windows deleted-current-directory failures. Their hosted
 Linux proof remains required; no test or assertion was skipped to mask them.
+
+## QML-07 local final source proof
+
+Windows Python 3.12.14, actual optional QML/MCP environment: all Qt/QML source
+contracts **613 passed, 6 skipped** in 48.69s before the final explicit normal-edit
+parity additions. Skips: two host symlink-permission cases, three artifact cases
+without GRAPHIFY_QML_TEST_WHEEL in that source command, and one absent optional
+SVG renderer. The actual HTTP and separate-process stdio protocol cases ran;
+they are not direct tool-function substitutions. The artifact cases run separately
+against the reviewed wheel. A Starlette/httpx deprecation warning remains visible.
+
+Final affected/header-definition/HTML/report/query/HTTP/stdio consumer subset:
+27 passed without skips. Export and SDK boundary regressions:83 passed with one
+absent optional SVG skip. Search/query/serve regressions:187 passed with one
+optional jieba skip. Generic affected/CLI path/query/explain/call-flow regressions:
+63 passed. Generic extraction CLI/extraction/cache hooks:336 passed with16
+documented baseline optional-language skips. Whole Ruff and lockcheck (210
+packages) pass; focused new helper/test typing has zero errors and warnings.
+Whole-repository baseline Pyright remains634 errors/4warnings; it is not claimed
+green. The established Windows deleted-current-directory baseline defects remain
+in the historical broad run; no assertion or skip was changed to conceal them.
+
+Skill/guidance/platform tests:91 passed. Each generator validator ran separately:
+--check (134 artifacts), --audit-coverage, --schema-singleton,
+--monolith-roundtrip and --always-on-roundtrip all pass. New handwritten Python
+files are below300 lines; measured legacy hooks are recorded in IMPLEMENTATION.md.
+All exact traceability test references resolve; the seventeen requirement IDs
+and sixty-eight acceptance IDs are retained. Public documentation/local-link,
+private marker and credential-shaped text review is part of final delivery.
+
+Final normal-edit parity, reviewed-source wheel digest, clean isolated optional/
+core smoke, graph refresh and exact-head hosted CI remain separately recorded
+gates. Earlier QML-03/04/05/06 passes do not verify the QML-07 revision.
+
+The final real incremental parity additions pass all6 cases without skips. Both
+actual manual update CLI and locked watch driver compare normal QML edits and
+no-change updates with cold/warm clean extraction/build/JSON. Accepted named IDs
+and unrelated Python facts survive. QML member/objectName changes leave C++ bytes
+unchanged while removing4 obsolete property/invoke/lookup links and acquiring4
+correct source-backed links; local shadowing removes context exposure. Complete
+public facts and logical endpoint direction match clean output. Only derived
+indexing/scoring fields are normalized; metadata, spans and confidence remain.
+
+The source graph refresh succeeded:19890 nodes,41131 edges,1069 communities.
+It is navigation data, not acceptance proof. Generated graphs/caches/reports and
+local coverage artifacts are excluded from the public change. Final privacy/link/
+stable-ID and new Python footprint review passes.
+
+### QML-07 reviewed artifact and initial hosted correction
+
+Implementation head `5e73bacf5529f83d014b3709959ebd1784a62593` has reviewed
+Git-index tree `0224d13a5eca209030b6c7873ac3fa052248dea0`. Its built wheel
+SHA256 is `99c5d1030f8781eecb7bb73834bd27086fa0a6c16ed9a5f814173d230f4f42ed`.
+Clean optional/core Python3.12.14 environments pass isolated `-I` offline smoke
+from a neutral directory, including native QML_ELEMENT/CMake/QRC integration;
+the actual built-artifact suite passes3 cases. Tree-sitter0.25.2 and optional
+language-pack0.11.0 are recorded. These local passes do not fill hosted cells.
+
+Final event mutation/removal additions pass2 cases (manual/watch); combined with
+normal-edit/no-change/reverse-access parity,8 pass without skips. An independent
+build/source-priority plus final-parity regression subset passes102 cases.
+Final navigation refresh:19924 nodes,41264 edges,1095 communities.
+
+[Draft fork PR5](https://github.com/SlinkyRamey/graphify/pull/5) is stacked on
+QML-06 head `9fd9cd0d13e601b8e716816020a761484db29b19`. Initial source head
+`5e73bacf5529f83d014b3709959ebd1784a62593` tested merge candidate
+`7229b127ee144b35426501467724e3c471c34b20`.
+The first [wheel run37094103638](https://github.com/SlinkyRamey/graphify/actions/runs/37094103638)
+passed the four Ubuntu installed-artifact lanes but exposed missing historical
+Git objects in Windows/macOS source-guidance tests: checkout was shallow and the
+frozen pre-split baseline could not be read. The wheel workflow now fetches full
+history, matching the existing main CI source-policy job. Tests and frozen guards
+are retained. This failed/obsolete run is not counted as final platform proof;
+the corrected reviewed revision requires its own complete matrix.
+
+
+## QML-07 corrected hosted completion
+
+Reviewed implementation/workflow head `235987b9a72e0353cbc9e8cf2c53c7ccd07fceed`; stack base `9fd9cd0d13e601b8e716816020a761484db29b19`;
+synthetic merge candidate `bcd4d7b4bf9ac1ce91f9e25957d6599fda75f87d`.
+[CI 37094308786](https://github.com/SlinkyRamey/graphify/actions/runs/37094308786) and
+[wheel 37094308526](https://github.com/SlinkyRamey/graphify/actions/runs/37094308526)
+are pull_request runs with successful conclusions. All four full Ubuntu Python
+source jobs and all twelve Windows/Linux/macOS Python3.10/3.12/3.13/3.14 optional/
+core wheel jobs succeed. The exact job test/skip and checkout evidence is recorded
+below after reading logs; an overall security job with continue-on-error steps
+does not establish absence of baseline findings.
+
+Final review preserves17requirements/68criteria, correct public support limits,
+privacy, local links and focused module ceilings. QML-00..07 are complete within
+the declared static profile. Documentation-only follow-up changes trigger fresh
+PR checks, whose current head is available from
+[PR5 checks](https://github.com/SlinkyRamey/graphify/pull/5/checks).
+The fork PRs remain draft/unmerged; upstream acceptance and package release have
+not happened. No additional increment is required for the agreed initial scope.
+
+Direct inspection of all16 test job logs confirms actual checkout
+`bcd4d7b4bf9ac1ce91f9e25957d6599fda75f87d`, distinct from the source head.
+Full Ubuntu suites: Python3.10 has6919passed/16skipped/24warnings;
+Python3.12 has6918passed/17skipped/19warnings; Python3.13 and3.14 each have
+6918passed/17skipped/10warnings. Each Ubuntu wheel job has3artifact tests passed
+without skips. Each Windows/macOS wheel job has622passed/3skipped: two optional
+MCP module omissions in the wheel extra, and the absent optional SVG renderer.
+Actual HTTP/stdio MCP cases execute in the full all-extras Linux source jobs and
+the isolated local SDK proof. All12 wheel jobs include installed optional/core
+offline smoke; no skip is counted as a pass.
+
+The security job's two nonblocking commands exit1. pip-audit reports15 known
+vulnerabilities in pip26.1.1, urllib3 2.7.0 and virtualenv21.3.3; all three exact
+versions already occur in the imported upstream lock. Bandit reports4HIGH SHA1
+and8MEDIUM findings; the reported statements are present verbatim in the imported
+upstream revision. No new production HIGH statement is identified. These are
+recorded existing findings, not a clean security scan and not a Qt parser issue.
+They remain upstream dependency/security debt rather than being silently fixed,
+hidden or treated as a passing scanner result in this feature change.
