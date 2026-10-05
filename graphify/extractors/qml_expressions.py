@@ -78,7 +78,19 @@ class ExpressionCollector:
             env.update({name: "" for name in bound_names(syntax.child_by_field_name("parameter"), self.source)})
         if kind == "call_expression":
             callee = syntax.child_by_field_name("function")
-            self.use("call", callee, syntax, owner, env)
+            # A literal signal.connect callback is source AST provenance. The
+            # context resolver never re-reads QML or evaluates an argument.
+            callback = {}
+            reference = qualified_name(callee, self.source) or ""
+            arguments = syntax.child_by_field_name("arguments")
+            args = [item for item in arguments.named_children if item.type != "comment"] if arguments else []
+            if reference.endswith(".connect"):
+                name = qualified_name(args[0], self.source) if len(args) == 1 else None
+                first = (name or "").split(".")[0]
+                callback = {"callback_reference": name or "", "callback_argument_count": len(args),
+                            "callback_lexical_shadowed": first in env,
+                            "callback_lexical_target_id": env.get(first, "") if name == first else ""}
+            self.use("call", callee, syntax, owner, env, **callback)
             if qualified_name(callee, self.source) is None:
                 self.scan(callee, owner, env)
             for argument in (syntax.child_by_field_name("arguments").named_children
@@ -111,14 +123,14 @@ class ExpressionCollector:
         for child in syntax.named_children:
             self.scan(child, owner, env)
 
-    def use(self, kind, target, syntax, owner, env):
+    def use(self, kind, target, syntax, owner, env, **fields):
         reference = qualified_name(target, self.source)
         first = (reference or "").split(".")[0]
         self.add(kind, syntax, owner, reference or "dynamic", reference=reference or "",
                  lexical_names=sorted(env)[:50], lexical_shadowed=first in env,
                  lexical_target_id=env.get(first, "") if reference == first else "",
                  status="dynamic" if reference is None else "pending",
-                 reason="computed_or_runtime_target" if reference is None else "")
+                 reason="computed_or_runtime_target" if reference is None else "", **fields)
 
 
 def _connection_target(syntax, source):
@@ -201,11 +213,15 @@ def _handler(declarations, collector, syntax, owner, name, body, object_syntax, 
     legacy = any(child.type == "ui_binding" and field(child, "name", collector.source).startswith("on")
                  and field(child, "name", collector.source)[2:3].isupper()
                  for child in initializer.named_children) if initializer else False
+    # Only legacy code blocks inherit signal declaration names. Function and
+    # arrow handlers bind their own formals, which need not use those names.
+    implicit_parameters = function is None and body is not None and body.type == "statement_block"
     handler = collector.add("handler", syntax, owner, name, reference=signal,
                             connection_target=target, connection_supplied=supplied,
                             connections=connections, attached_prefix=name[:-len(short)].rstrip("."),
+                            implicit_parameters=implicit_parameters,
                             disabled_reason="connections_mixed_handler_styles" if connections and function and legacy else "")
-    env = _signal_parameters(declarations, owner, signal, target)
+    env = _signal_parameters(declarations, owner, signal, target) if implicit_parameters else {}
     if function:
         collector.function_body(function, handler, env)
     else:

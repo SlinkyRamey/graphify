@@ -18,6 +18,7 @@ from graphify.paths import (
     os_replace_with_fallback,
     write_text_atomic,
 )
+from graphify.publication import ProductPublication
 
 logger = logging.getLogger(__name__)
 _PENDING_FILENAME = ".pending_changes"
@@ -825,6 +826,8 @@ def _reconcile_existing_graph(
     deleted_source_identities: set[str],
     is_ignored_always: Callable[[Path], bool] | None = None,
     is_ignored_full: Callable[[Path], bool] | None = None,
+    preserve_sourceless_ast: bool = False,
+    prior_import_ids: set[str] | None = None,
 ) -> tuple[dict, dict]:
     """Merge fresh extraction with preserved graph entries and evict stale sources.
 
@@ -836,6 +839,10 @@ def _reconcile_existing_graph(
     .gitignore-driven rules, honored only on a full rebuild (an explicit
     ``graphify update``) so the incremental/hook path keeps preserving a
     deliberately-graphed .gitignore'd tree (#1795).
+
+    ``prior_import_ids`` is caller-owned cleanup proof. It receives only
+    persisted source-owned imports before legacy provenance inference; inferred
+    origins are compatibility annotations and cannot authorize removal.
     """
     existing_graph_data: dict = {}
     if not existing_graph.exists():
@@ -858,6 +865,13 @@ def _reconcile_existing_graph(
     # staying fail-closed.
     existing = json.loads(existing_graph.read_text(encoding="utf-8"))
     existing_graph_data = existing
+
+    # Capture cleanup authority from persisted producer facts before legacy
+    # origin inference can turn an unmarked import into accepted AST evidence.
+    if prior_import_ids is not None:
+        from graphify.build import _EXTERNAL_STUB_RELATIONS
+        from graphify.qt_orphan_cleanup import previous_import_targets
+        prior_import_ids.update(previous_import_targets(existing, import_relations=_EXTERNAL_STUB_RELATIONS))
 
     # Backfill tier provenance on legacy items (#2334), mirroring
     # build._load_existing_graph (this reconcile path loads the raw dict
@@ -1024,6 +1038,7 @@ def _reconcile_existing_graph(
                 and (
                     (
                         not node.get("source_file")
+                        and not preserve_sourceless_ast
                         and (full_rebuild or not code_files)
                     )
                     or (
@@ -1132,9 +1147,27 @@ def _node_community_map(graph_data: dict) -> dict[str, int]:
     return out
 
 
+def _valid_publication_direction(edges, *, directed) -> bool:
+    """Reject corrupt transport before shortcuts can strip markers or accept checkpoints."""
+    from graphify.graph_direction import valid_direction_pairs
+    if valid_direction_pairs(edges, directed=directed):
+        return True
+    print("[graphify watch] error: QT_EXPORT_DIRECTION: invalid logical edge pair; prior products retained. "
+          "Re-extract or repair the graph and retry.", file=sys.stderr)
+    return False
+
+
 def _canonical_graph_for_compare(graph_data: dict) -> dict:
     canonical = dict(graph_data)
     canonical.pop("built_at_commit", None)
+    # Initial extraction and incremental reconciliation omit different empty
+    # run lists. Only their absent/empty forms are equivalent; nonempty values,
+    # malformed transport and unknown metadata remain observable differences.
+    for key in ("diagnostics", "failed_sources", "qml_failures", "qt_failures", "hyperedges"):
+        canonical.setdefault(key, [])
+    # This list describes the current extraction run, not persistent source
+    # facts. Nodes, edges and their authoritative source proof remain compared.
+    canonical.pop("extracted_sources", None)
     # A missing "directed" key means the same thing as "directed": false
     # everywhere else in the codebase (#2342's --no-cluster path only started
     # writing the key once it began inheriting it from the existing graph).
@@ -1312,12 +1345,19 @@ def _stabilize_rebuild_cwd(watch_path: Path) -> bool:
         return True
 
     repo_root = os.environ.get("GRAPHIFY_REPO_ROOT", "").strip()
+    # Keep recovery order unchanged, but retain the supplied root's safe failure
+    # category if CWD lookup also fails. Raw paths and OS exception bodies may
+    # contain private repository details and do not belong in this diagnostic.
+    root_failure = (
+        "GRAPHIFY_REPO_ROOT does not name an available directory."
+        if repo_root else "GRAPHIFY_REPO_ROOT is not set."
+    )
     if repo_root and Path(repo_root).is_dir():
         try:
             os.chdir(repo_root)
             return True
         except OSError:
-            pass
+            root_failure = "GRAPHIFY_REPO_ROOT could not be entered."
 
     try:
         Path.cwd()
@@ -1325,7 +1365,7 @@ def _stabilize_rebuild_cwd(watch_path: Path) -> bool:
     except FileNotFoundError:
         print(
             "[graphify watch] Rebuild failed: current working directory "
-            "no longer exists and GRAPHIFY_REPO_ROOT is not set."
+            f"no longer exists and {root_failure}"
         )
         return False
 
@@ -1708,6 +1748,10 @@ def _rebuild_code(
                     # File was deleted or renamed away inside the watched root.
                     # Evict preserved nodes that still claim this source path.
                     _add_deleted_source(deleted_in_root)
+            # Shared physical bytes can change every already admitted lexical
+            # owner. Keep semantic documents and discovery outside this boundary.
+            from graphify.watch_coowners import expand_changed_coowners
+            wanted = expand_changed_coowners(wanted, (p for p in code_files if p not in semantic_doc_files), root=watch_root)
             from graphify.extractors.terraform import refresh_terraform_paths
             wanted = refresh_terraform_paths(wanted, code_files, changed_paths)
             # Changes to QML/metadata/embedded JS may invalidate unchanged QML
@@ -1889,6 +1933,14 @@ def _rebuild_code(
         # gate reports them unchanged forever and only deleting graphify-out/
         # recovers. Mirrors the extract CLI's _stamped_manifest_files handling.
         _failed_ast_sources = set(result.get("failed_sources") or [])
+        # A complete accepted Qt refresh may retire stale generic placeholders
+        # only after reconciliation exposes every surviving edge/hyperedge.
+        fresh_ast_ids = {node["id"] for node in result.get("nodes", [])}
+        complete_qt_refresh = bool(
+            qt_state.has_qt and not _failed_ast_sources
+            and {Path(path).resolve() for path in extract_targets}
+            == {Path(path).resolve() for path in code_files if path not in semantic_doc_files}
+        )
 
         def _ast_manifest_files() -> dict[str, list[str]]:
             """detected["files"] minus this run's failed AST sources (#2543).
@@ -1918,6 +1970,22 @@ def _rebuild_code(
                 for ftype, flist in detected["files"].items()
             }
 
+        def _stage_analysis_products(publication: ProductPublication) -> None:
+            """Prepare existing serializers against old seeded bytes, never accepted paths."""
+            from graphify.detect import save_manifest
+            publication.stage(".graphify_root").write_text(
+                _graphify_root_marker_value(watch_path), encoding="utf-8")
+            save_manifest(
+                _ast_manifest_files(), manifest_path=str(publication.stage("manifest.json")),
+                kind="ast", root=watch_root,
+                scan_corpus={f for files in detected["files"].values() for f in files},
+                clear_ast=_failed_ast_sources or None,
+            )
+            if not _failed_ast_sources:
+                commit_qt_analysis(publication.stage(".qt_analysis.json").parent, qt_state)
+
+        accepted_products = ("graph.json", ".graphify_root", "manifest.json", ".qt_analysis.json")
+
         # Preserve semantic nodes/edges from a previous full run.
         # AST-only rebuild replaces nodes for changed files; everything else is kept.
         # Filter by node ID membership in the new AST output, not by file_type —
@@ -1926,6 +1994,7 @@ def _rebuild_code(
         # When the caller supplied changed_paths, also evict preserved nodes whose
         # source_file matches a path that was changed (re-extracted) or deleted —
         # otherwise the old nodes for those files would survive forever.
+        prior_import_ids: set[str] = set()
         try:
             result, existing_graph_data = _reconcile_existing_graph(
                 existing_graph,
@@ -1940,6 +2009,8 @@ def _rebuild_code(
                 deleted_source_identities=deleted_source_identities,
                 is_ignored_always=_ignored_always,
                 is_ignored_full=_ignored_full,
+                preserve_sourceless_ast=complete_qt_refresh,
+                prior_import_ids=prior_import_ids if complete_qt_refresh else None,
             )
         except (RuntimeError, ValueError) as exc:
             # Existing graph present but unreadable — over the size cap
@@ -1951,6 +2022,11 @@ def _rebuild_code(
             # graph".
             print(f"error: {exc}", file=sys.stderr)
             return False
+
+        from graphify.qt_orphan_cleanup import prune_stale_ast_orphans
+        result = prune_stale_ast_orphans(
+            result, fresh_ids=fresh_ast_ids, complete_refresh=complete_qt_refresh,
+            prior_import_ids=prior_import_ids)
 
         _relativize_source_files(result, project_root, scope=watch_root)
         # Source files re-extracted this run — their symbol sets may legitimately
@@ -1998,7 +2074,17 @@ def _rebuild_code(
             # an import to stdlib / a third-party module leaves an undeclared
             # endpoint in graph.json that every loader materialises as an
             # attribute-less phantom (#2873).
+            # Publication-created stubs are semantic placeholders from their
+            # first write, matching reconciliation without retagging authored
+            # or source-backed nodes already present in the merged extraction.
+            prior_node_count = len(candidate_graph_data["nodes"])
             _mint_external_stubs_in_data(candidate_graph_data)
+            for stub in candidate_graph_data["nodes"][prior_node_count:]:
+                stub.setdefault("_origin", "semantic")
+            if not _valid_publication_direction(
+                    ((edge["source"], edge["target"], edge) for edge in candidate_graph_data["links"]),
+                    directed=candidate_graph_data["directed"]):
+                return False
             candidate_graph_text = _json_text(candidate_graph_data)
             same_graph = False
             if existing_graph.exists():
@@ -2034,43 +2120,14 @@ def _rebuild_code(
                     return False
                 from graphify.export import backup_if_protected as _backup
                 _backup(out)
-                # Atomic replace via tmp file, matching the clustered path: a
-                # crash mid-write must not leave a truncated graph.json.
-                # os_replace_with_fallback, not a plain Path.replace (#2689):
-                # this function just read existing_graph a few lines up, and
-                # on a VMware HGFS shared folder a replace over a destination
-                # read earlier in the same process raises PermissionError
-                # even on the same drive.
-                graph_tmp = out / ".graph.tmp.json"
-                graph_tmp.write_text(candidate_graph_text, encoding="utf-8")
-                os_replace_with_fallback(graph_tmp, existing_graph)
-
-            # Write the scan root only after the candidate graph is accepted,
-            # so a refused shrink cannot mismatch graph and marker. See
-            # _graphify_root_marker_value for why this isn't always the raw
-            # caller-supplied value (#3375).
-            (out / ".graphify_root").write_text(
-                _graphify_root_marker_value(watch_path), encoding="utf-8"
-            )
-
-            try:
-                from graphify.detect import save_manifest
-                # detected["files"] is a FULL detect of the watched root, so
-                # pass it as the scan corpus too: rows for files that left the
-                # scan but still exist on disk (newly excluded) are pruned
-                # instead of surviving as phantom "deleted" entries (#1908).
-                # Failed AST sources are dropped from the stamped set and
-                # their prior hashes blanked (#2543).
-                save_manifest(
-                    _ast_manifest_files(), manifest_path=str(out / "manifest.json"),
-                    kind="ast", root=watch_root,
-                    scan_corpus={f for _fl in detected["files"].values() for f in _fl},
-                    clear_ast=_failed_ast_sources or None,
-                )
-                if not _failed_ast_sources:
-                    commit_qt_analysis(out, qt_state)
-            except Exception:
-                pass
+            # Prepare all acceptance products before the first replacement;
+            # an exception restores their old bytes rather than accepting a
+            # graph whose manifest or Qt fingerprint was never committed.
+            with ProductPublication(out, accepted_products, replace=os_replace_with_fallback) as publication:
+                if not same_graph:
+                    publication.stage("graph.json").write_text(candidate_graph_text, encoding="utf-8")
+                _stage_analysis_products(publication)
+                publication.commit()
 
             if same_graph:
                 print("[graphify watch] No code-graph changes detected (--no-cluster); outputs left untouched.")
@@ -2094,6 +2151,8 @@ def _rebuild_code(
         # update` can't silently downgrade a directed graph to undirected -
         # build_from_json defaults to directed=False otherwise.
         G = build_from_json(result, directed=bool((existing_graph_data or {}).get("directed", False)))
+        if not _valid_publication_direction(G.edges(data=True), directed=G.is_directed()):
+            return False
         candidate_topology = _topology_from_graph(G)
         if existing_graph_data:
             try:
@@ -2104,20 +2163,9 @@ def _rebuild_code(
             except Exception:
                 same_topology = False
             if same_topology:
-                try:
-                    from graphify.detect import save_manifest
-                    # Full-scan save: prune excluded-but-alive rows (#1908);
-                    # leave failed AST sources unstamped (#2543).
-                    save_manifest(
-                        _ast_manifest_files(), manifest_path=str(out / "manifest.json"),
-                        kind="ast", root=watch_root,
-                        scan_corpus={f for _fl in detected["files"].values() for f in _fl},
-                        clear_ast=_failed_ast_sources or None,
-                    )
-                    if not _failed_ast_sources:
-                        commit_qt_analysis(out, qt_state)
-                except Exception:
-                    pass
+                with ProductPublication(out, accepted_products, replace=os_replace_with_fallback) as publication:
+                    _stage_analysis_products(publication)
+                    publication.commit()
                 html_action = _reconcile_graph_html(out, existing_graph_data)
                 if html_action == "rendered":
                     print(
@@ -2241,7 +2289,6 @@ def _rebuild_code(
         no_change = same_graph and same_report
         if no_change:
             graph_tmp.unlink(missing_ok=True)
-            print("[graphify watch] No code-graph changes detected; graph.json/GRAPH_REPORT.md left untouched.")
         else:
             if not _check_shrink(
                 force, existing_graph_data, candidate_graph_data,
@@ -2251,62 +2298,31 @@ def _rebuild_code(
                 failed_sources=failed_sources,
             ):
                 return False
-            from graphify.exporters.html import _HTML_STALE_MARKER
-            # Mark before graph.json advances so an interruption cannot leave a
-            # previous visualization looking current to the fast path.
-            (out / _HTML_STALE_MARKER).touch()
             from graphify.export import backup_if_protected as _backup
             _backup(out)
-            # os_replace_with_fallback, not a plain Path.replace (#2689): this
-            # function read existing_graph a few lines up for the same_graph
-            # comparison, and on a VMware HGFS shared folder a replace over a
-            # destination read earlier in the same process raises
-            # PermissionError even on the same drive.
-            os_replace_with_fallback(graph_tmp, existing_graph)
-            write_text_atomic(report_path, report)
-            # Keep the membership signatures in step with the labels we just wrote.
-            # Skipping this was the other half of the stale-label bug: labels.json
-            # advanced every rebuild while the sidecar kept describing an older
-            # clustering, so the guard above had nothing accurate to check against.
-            #
-            # Each write is atomic, so a kill mid-write can never publish a
-            # half-written sidecar (a torn one would be unparseable, which the
-            # guard reads as "no saved signatures" and falls back to the
-            # count heuristic).
-            #
-            # Labels go down BEFORE the signatures, and that order matters. The
-            # guard above compares the SAVED signatures against ones recomputed
-            # from the current clustering — not against the labels. So publishing
-            # signatures first and crashing would leave a sidecar that already
-            # describes the new clustering sitting beside the OLD labels: the
-            # guard recomputes the same signatures, finds them equal, reports
-            # nothing stale, and silently keeps names that describe a clustering
-            # that no longer exists. Writing labels first keeps the sidecar
-            # trailing, which the guard sees as a mismatch and re-labels.
-            write_text_atomic(labels_file, labels_json)
-            write_text_atomic(
-                sig_file, json.dumps({str(k): v for k, v in cur_sigs.items()}))
-
-        # See _graphify_root_marker_value for why this isn't always the raw
-        # caller-supplied value (#3375).
-        (out / ".graphify_root").write_text(
-            _graphify_root_marker_value(watch_path), encoding="utf-8"
-        )
-
+        # The graph, report and labeling sidecars share publication ownership.
+        # Keep stale-marker-before-graph and label-before-signature ordering for
+        # crash recovery; ordinary exceptions roll back the entire cohort.
+        from graphify.exporters.html import _HTML_STALE_MARKER
+        products = (*accepted_products, "GRAPH_REPORT.md", labels_file.name,
+                    sig_file.name, _HTML_STALE_MARKER)
         try:
-            from graphify.detect import save_manifest
-            # Full-scan save: prune excluded-but-alive rows (#1908);
-            # leave failed AST sources unstamped (#2543).
-            save_manifest(
-                _ast_manifest_files(), manifest_path=str(out / "manifest.json"),
-                kind="ast", root=watch_root,
-                scan_corpus={f for _fl in detected["files"].values() for f in _fl},
-                clear_ast=_failed_ast_sources or None,
-            )
-            if not _failed_ast_sources:
-                commit_qt_analysis(out, qt_state)
-        except Exception:
-            pass
+            with ProductPublication(out, products, replace=os_replace_with_fallback) as publication:
+                if not no_change:
+                    import shutil
+                    publication.stage(_HTML_STALE_MARKER).touch()
+                    shutil.copyfile(graph_tmp, publication.stage("graph.json"))
+                    graph_tmp.unlink(missing_ok=True)
+                    write_text_atomic(publication.stage("GRAPH_REPORT.md"), report)
+                    write_text_atomic(publication.stage(labels_file.name), labels_json)
+                    write_text_atomic(publication.stage(sig_file.name),
+                                      json.dumps({str(k): v for k, v in cur_sigs.items()}))
+                _stage_analysis_products(publication)
+                publication.commit()
+        finally:
+            graph_tmp.unlink(missing_ok=True)
+        if no_change:
+            print("[graphify watch] No code-graph changes detected; graph.json/GRAPH_REPORT.md left untouched.")
 
         # Reconcile from the persisted graph. The stale marker was written
         # before graph.json advanced, so a failed or interrupted atomic render

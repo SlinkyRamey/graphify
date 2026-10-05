@@ -15,6 +15,7 @@ from pathlib import Path, PurePath
 from typing import Any, Callable
 
 from .cache import load_cached, save_cached
+from .source_identity import normalize_input_source, resolved_source_owners, walked_relative_source
 from .mcp_ingest import extract_mcp_config, is_mcp_config_path
 from .manifest_ingest import extract_package_manifest, is_package_manifest_path
 from .resolver_registry import (
@@ -6935,20 +6936,6 @@ def _is_objc_header(path: Path) -> bool:
     return any(marker in head for marker in _OBJC_HEADER_MARKERS)
 
 
-# C++-only signals. None of these are valid in a plain C header, so finding one
-# in a `.h` is a high-confidence signal the header is C++ (#1547). The C grammar
-# has no class_specifier, so a `class Foo { ... };` header routed to extract_c
-# loses the class and its method prototypes (a junk `foo_foo` node + a sourceless
-# `class` stub); routing to extract_cpp recovers the real type. Kept CONSERVATIVE:
-# a plain C header with none of these stays on extract_c. ObjC sniffing keeps
-# priority (an ObjC header can legitimately contain `::`/`class` inside an inline
-# C++ block when compiled as Objective-C++).
-_CPP_HEADER_MARKERS = (
-    b"class ", b"namespace ", b"template", b"::",
-    b"public:", b"private:", b"protected:",
-)
-
-
 def _is_objc_source(path: Path) -> bool:
     """Whether a `.m` file is Objective-C rather than MATLAB/Octave (#1702).
 
@@ -6966,16 +6953,14 @@ def _is_objc_source(path: Path) -> bool:
 def _is_cpp_header(path: Path) -> bool:
     """Whether a `.h` file is C++ rather than plain C (#1547).
 
-    Mirrors `_is_objc_header`: sniffs for a C++-only token. Used only to reroute
-    a `.h` from extract_c to extract_cpp when no ObjC marker is present (ObjC has
-    priority). Conservative by construction — a plain C header matches nothing
-    here and keeps its existing extract_c routing.
+    Visible declaration tokens in the bounded header prefix select C++, across
+    whitespace and comments between tokens. Inert literals/comments and
+    inconclusive headers retain C. Objective-C selection has priority.
     """
-    try:
-        head = path.read_bytes()[:256 * 1024]
-    except OSError:
-        return False
-    return any(marker in head for marker in _CPP_HEADER_MARKERS)
+    # Admission uses visible tokens across whitespace; strings/comments cannot
+    # select another parser. This standard-library helper needs no Qt parser.
+    from graphify.cpp_header import is_cpp_header
+    return is_cpp_header(path)
 
 
 def _get_extractor(path: Path) -> Any | None:
@@ -7353,8 +7338,10 @@ def extract(
             resolution_context_nodes: they widen the resolvers' view but only
             fresh results are appended to the returned nodes/edges.
     """
-    paths = [Path(p) for p in paths]
     anchor_root = Path(root) if root is not None else None
+    # Normalize native entry spellings before facts, worker dispatch or cache keys.
+    context_root = anchor_root if anchor_root is not None else cache_root
+    paths = [normalize_input_source(Path(p), context_root) for p in paths]
     _check_tree_sitter_version()
     _raise_recursion_limit()
     # Workspace package manifests/globs can change during watch or repeated extraction.
@@ -7404,6 +7391,12 @@ def extract(
     elif cache_root is not None:
         root = cache_root
     root = root.resolve()
+    # One source-name decision serves IDs and provenance; realpath state remains
+    # owned by this analysis run, with no second cache or discovery authority.
+    def _walked_rel(path, resolved=None):
+        walked = Path(os.path.abspath(path))
+        physical = resolved if resolved is not None else _cached_realpath(str(walked), os.getcwd())
+        return walked_relative_source(walked, root, physical, realpath=_cached_realpath, cwd=os.getcwd())
     python_scan_paths = list(paths)
     for context_node in resolution_context_nodes or []:
         source_file = context_node.get("source_file")
@@ -7698,7 +7691,7 @@ def extract(
     # still carry the raw file-stem prefix; the per-file prefix remap then diverges
     # them (foo_h vs foo_cpp), so the collapse must happen first. Collapsing here
     # also means disambiguation sees one source_file per id and won't split them.
-    _merge_decl_def_classes(all_nodes, all_edges)
+    _merge_decl_def_classes(all_nodes, all_edges, all_raw_calls)
 
     # Remap file node IDs from absolute-path-derived to the canonical
     # {parent_dir}_{stem} spec form so (a) graph.json edge endpoints are stable
@@ -7736,7 +7729,7 @@ def extract(
     # file node is correctly relativized to main and the skill.md spec wants
     # main_run -- splitting the symbol into AST/semantic ghosts (#1096). Relativize
     # the symbol prefix the same way, gated by source_file so two files sharing a
-    # prefix can't cross-contaminate. Keyed by resolved path -> (old_pref, new_pref).
+    # prefix can't cross-contaminate. Keyed by walked root-relative source identity.
     # Each file maps from up to TWO old prefixes — the input-form prefix
     # _file_node_id(path) and the absolute-resolved-form prefix
     # _file_node_id(path.resolve()). Alias/workspace imports resolve specifiers
@@ -7778,9 +7771,9 @@ def extract(
             # Already covered: either the target is in this batch (its input
             # form is the same form the extractors minted ids from, and the
             # per-path loop registers both that and the resolved form) or an
-            # earlier stamped edge registered it. Re-appending it here would
-            # re-run its per-path iteration AFTER later batch files and could
-            # flip the last-writer of a colliding old-id key.
+            # earlier stamped edge registered it. The ownership pass below
+            # handles shared forms independently; no redundant target entry
+            # should participate in its accepted source claims.
             continue
         _remap_seen.add(_tp)
         try:
@@ -7836,15 +7829,15 @@ def extract(
         if _raw_tp != _tp:
             _remap_seen.add(_raw_tp)
             remap_paths.append(_raw_tp)
+    # Shared physical forms have one explicit owner, independent of batch order.
+    _physical_owners = resolved_source_owners(
+        remap_paths, root, walked_relative=_walked_rel, realpath=_cached_realpath, cwd=os.getcwd())
     for path in remap_paths:
         old_id = _make_id(str(path))
         try:
-            rel = path.relative_to(root)
+            rel = _walked_rel(path)
         except ValueError:
-            try:
-                rel = path.resolve().relative_to(root)
-            except ValueError:
-                continue
+            continue
         new_id = _file_node_id(rel)
         if old_id != new_id:
             id_remap[old_id] = new_id
@@ -7852,8 +7845,9 @@ def extract(
         # alias/workspace import targets (resolved via .resolve()) remap to
         # canonical instead of orphaning (#1529).
         old_id_abs = _make_id(str(path.resolve()))
-        if old_id_abs != new_id:
-            id_remap[old_id_abs] = new_id
+        physical_id = _file_node_id(_physical_owners[path.resolve()])
+        if old_id_abs != physical_id:
+            id_remap[old_id_abs] = physical_id
         old_prefs: list[tuple[str, str]] = []
         old_pref = _file_node_id(path)
         if old_pref != new_id:
@@ -7869,18 +7863,19 @@ def extract(
         # (#2243). Register the suffixed forms, preserving the extension tail
         # exactly as the prefix remap yields for in-batch entry nodes
         # (`c.sh` -> `c_sh__entry`): new prefix + the tail of the minted id.
-        for _old, _pref in ((old_id, old_pref), (old_id_abs, old_pref_abs)):
+        for _old, _pref, _owner in ((old_id, old_pref, new_id),
+                                    (old_id_abs, old_pref_abs, physical_id)):
             if not _old.startswith(_pref):
                 continue
-            _entry_new = new_id + _old[len(_pref):] + "__entry"
+            _entry_new = _owner + _old[len(_pref):] + "__entry"
             _entry_old = _old + "__entry"
             if _entry_old != _entry_new:
                 id_remap.setdefault(_entry_old, _entry_new)
         if old_prefs:
-            prefix_remap[path.resolve()] = old_prefs
+            prefix_remap[root / rel] = old_prefs
         # Absolute form first: it is the longest, so prefix decomposition can
         # try forms in order without a shorter form shadowing it.
-        stem_forms[path.resolve()] = (
+        stem_forms[root / rel] = (
             new_id, [old_pref_abs, old_pref, new_id]
         )
     if id_remap:
@@ -7932,7 +7927,7 @@ def extract(
             if n.get("type") == "package":
                 continue
             try:
-                entry = prefix_remap.get(Path(sf).resolve())
+                entry = prefix_remap.get(root / _walked_rel(Path(sf)))
             except Exception:
                 continue
             if entry is None:
@@ -8038,8 +8033,8 @@ def extract(
 
         def _decompose(target: str, tf: str) -> "tuple[str, str] | None":
             try:
-                forms = stem_forms.get(Path(tf).resolve())
-            except (OSError, RuntimeError):
+                forms = stem_forms.get(root / _walked_rel(Path(tf)))
+            except (OSError, RuntimeError, ValueError):
                 return None
             if not forms:
                 return None
@@ -8733,24 +8728,25 @@ def extract(
         cached = _sf_forms.get(sf)
         if cached is not None:
             return cached
+        # Accepted aliases identify the same physical source as the canonical
+        # scan root. Decide containment before the external-path fallback so a
+        # nearby short/symlink parent cannot turn native provenance into ../..
+        # transport. Keep written and resolved forms for existing endpoint joins.
         try:
-            rel = sf_path.relative_to(root)
+            sf_resolved = _cached_realpath(str(sf_path), os.getcwd())
+        except (OSError, RuntimeError):
+            sf_resolved = sf_path
+        try:
+            rel = _walked_rel(sf_path, sf_resolved)
         except ValueError:
             portable = _portable_out_of_root_sf(sf_path)
             canonical_id = _make_id("ext", portable)
             new_sf = portable
         else:
-            # In-root: the same canonical repo-relative form the real file
-            # node uses (_file_node_id), so the scan root can never leak into
-            # a persisted id. Real file nodes were already remapped by the
-            # #2169 pass, so only leftover absolute-derived ids match below
-            # (belt-and-braces for #2195 regex-rescue stubs and friends).
+            # IDs and source/definition provenance use the same physically
+            # admitted walked identity, including distinct discovered aliases.
             canonical_id = _file_node_id(rel)
             new_sf = rel.as_posix()
-        try:
-            sf_resolved = sf_path.resolve()
-        except (OSError, RuntimeError):
-            sf_resolved = sf_path
         # Learn the STEM (extension-dropped) forms too: symbol producers mint
         # compound ids as _make_id(_file_stem(path), name), so a node-less
         # absolute-derived endpoint arrives as <stem-key>_<symbol> and only

@@ -19,7 +19,7 @@ class QtQmlBridgeIndex(QtMemberViews):
         classes = {}
         for node in self.nodes.values():
             md = qt_metadata(node)
-            if md.get("kind") == "class" and md.get("class_id"):
+            if md.get("kind") == "class" and md.get("class_id") and md.get("is_definition") is True:
                 classes.setdefault(md["class_id"], []).append(md)
         for node in self.nodes.values():
             md = qt_metadata(node)
@@ -41,7 +41,6 @@ class QtQmlBridgeIndex(QtMemberViews):
                 value.update(uri=module.get("uri"), major=module.get("major"), minor=module.get("minor"),
                              evidence=value["evidence"] + context.evidence + (context.target_id,))
                 if isinstance(value["major"], int) and isinstance(value["minor"], int):
-                    self.module_bounds.setdefault(value["uri"], set()).add((value["major"], value["minor"]))
                     value["module_minor"] = value["minor"]
                     added = value.get("added_version") or [value["major"], 0]
                     value["minor"] = added[1] if added[0] == value["major"] else 0
@@ -50,10 +49,18 @@ class QtQmlBridgeIndex(QtMemberViews):
                 self.unresolved[node["id"]] = value
                 continue
             observed = classes.get(value["class_id"], [])
+            if not observed:
+                value.update(status="unavailable", reason="native_class_definition_unavailable")
+                self.unresolved[node["id"]] = value
+                continue
             if not any(item.get("is_qobject") for item in observed):
                 value.update(status="unsupported", reason="native_class_metaobject_unavailable")
                 self.unresolved[node["id"]] = value
                 continue
+            # Version bounds authorize only accepted native providers. Rejected
+            # gadgets or missing classes cannot create a namespace with no type.
+            if "module_minor" in value:
+                self.module_bounds.setdefault(value["uri"], set()).add((value["major"], value["module_minor"]))
             self.provider_records[node["id"]] = value
             self.modules.setdefault(value["uri"], []).append(node["id"])
 

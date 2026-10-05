@@ -1,7 +1,8 @@
 """Resolve literal C++ access to accepted QML source, never instantiate components."""
 from __future__ import annotations
 
-from graphify.extractors.qt_cpp_facts import qt_edge, qt_metadata, scope_owner, update_qt
+from graphify.extractors.qt_cpp_facts import qt_edge, qt_metadata, update_qt
+from graphify.extractors.qt_cpp_identity import source_reference_key
 from graphify.qml_resolution_types import Resolution
 from graphify.qml_resolution_types import qml_metadata
 from graphify.qt_qml_access_index import QtQmlAccessIndex
@@ -20,25 +21,43 @@ def resolve_qt_qml_access(per_file, all_nodes, all_edges, *, root, project_index
     index = QtQmlAccessIndex(all_nodes, all_edges, root=root, project_index=project_index)
     results = list(per_file.values() if isinstance(per_file, dict) else per_file)
     sites = sorted([(site, result) for result in results if result for site in result.get("nodes", [])
-                    if qt_metadata(site).get("kind") in {"qml_load", "qml_root", "qml_access", "context_exposure", "initial_properties"}],
+                    if qt_metadata(site).get("kind") in {"qml_load", "qml_root", "qml_access", "qml_parent_mutation", "context_exposure", "initial_properties"}],
                    key=lambda pair: (pair[0]["source_file"], qt_metadata(pair[0]).get("span", {}).get("start_byte", -1)))
     for site, result in sites:
         metadata, edges = qt_metadata(site), []
-        owner, receiver = scope_owner(metadata), metadata.get("receiver_reference")
         kind, operation = metadata["kind"], metadata.get("operation")
-        key = (owner, receiver)
+        key = source_reference_key(metadata)
         context = "qt_cpp_qml_load"
         if kind == "qml_load":
-            resolution = index.load(metadata)
-            index.loads.setdefault(key, []).append(resolution)
+            if key:
+                resolution = index.load(metadata)
+                index.loads.setdefault(key, []).append(resolution)
+            else:
+                status = metadata.get("receiver_identity_status")
+                resolution = Resolution(status if status in {"dynamic", "ambiguous", "unsupported"} else "unavailable",
+                                        reason=metadata.get("receiver_identity_reason") or "loader_declaration_unestablished")
         elif kind == "qml_root":
             loads = index.loads.get(key, [])
-            if len(loads) != 1 or not loads[0].target_id:
+            # Creation-context rejection precedes otherwise valid source loading.
+            if metadata.get("loader_supported") is False:
+                resolution = Resolution("unsupported", reason=metadata.get("loader_reason") or "loader_overload_unestablished")
+            elif len(loads) != 1 or not loads[0].target_id:
                 resolution = Resolution("ambiguous" if len(loads) > 1 else "unavailable", reason="unique_source_loader_unestablished")
             elif operation == "rootObjects" and not metadata.get("single_root_selection"):
                 resolution = Resolution("unsupported", reason="root_list_requires_static_selection")
             else:
                 resolution = index.root_object(loads[0].target_id)
+        elif kind == "qml_parent_mutation":
+            # Only an established QML receiver invalidates its accepted tree;
+            # unrelated QObject mutations grant no component identity.
+            handle = index.handle(metadata)
+            if handle.target_id:
+                index.mark_parent_mutation(handle.target_id)
+            resolution = Resolution("dynamic", reason="runtime_parent_mutation")
+        elif kind == "qml_access" and metadata.get("reflection_supported") is False:
+            # A valid QObject handle cannot lend SDK authority to a source
+            # reflection class. Rejection must precede member/handle seeding.
+            resolution = Resolution("unsupported", reason="reflection_api_type_unestablished")
         elif kind == "qml_access":
             if metadata.get("handle_role") == "root":
                 loads = index.loads.get(key, [])
@@ -53,7 +72,10 @@ def resolve_qt_qml_access(per_file, all_nodes, all_edges, *, root, project_index
             elif not isinstance(metadata.get("lookup_name"), str):
                 resolution = Resolution("dynamic", reason="computed_access_name")
             elif operation == "findChild":
-                resolution = index.find_child(handle.target_id, metadata["lookup_name"])
+                resolution = (index.find_child(handle.target_id, metadata["lookup_name"],
+                                               options=metadata.get("find_child_options", "unsupported"))
+                              if metadata.get("find_child_type_supported") else
+                              Resolution("unsupported", reason="find_child_type_unsupported"))
                 context = "qt_cpp_qml_find_child"
             else:
                 resolution = index.member(handle.target_id, metadata["lookup_name"], operation)
@@ -65,10 +87,11 @@ def resolve_qt_qml_access(per_file, all_nodes, all_edges, *, root, project_index
             context = "qt_context_exposure" if kind == "context_exposure" else "qt_initial_property"
         _annotate(site, resolution)
         if resolution.target_id:
-            relation = "calls" if operation == "invokeMethod" and qml_metadata(index.nodes[resolution.target_id]).get("kind") == "function" else "uses"
+            relation = "calls" if operation == "invokeMethod" and index.qml.md(resolution.target_id).get("kind") == "function" else "uses"
             edges.append(qt_edge(site, resolution.target_id, relation, context, bridge_direction="cpp_to_qml"))
-            if metadata.get("assigned_handle") and kind in {"qml_root", "qml_access"}:
-                index.handles[(owner, metadata["assigned_handle"])] = (resolution.target_id, metadata.get("assignment_byte", -1), bool(metadata.get("conditional")))
+            assigned = source_reference_key(metadata, "assigned")
+            if assigned and kind in {"qml_root", "qml_access"}:
+                index.handles[assigned] = (resolution.target_id, metadata.get("assignment_byte", -1), bool(metadata.get("conditional")))
         known = {(edge["source"], edge["target"], edge.get("context")) for edge in result.get("edges", [])}
         additions = [edge for edge in edges if (edge["source"], edge["target"], edge.get("context")) not in known]
         result.setdefault("edges", []).extend(additions)

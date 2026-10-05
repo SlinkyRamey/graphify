@@ -51,6 +51,12 @@ tests with the behavior they describe. Review the staged and complete diff befor
 committing; exclude unrelated changes, local configuration, and generated outputs
 unless those outputs are required by the upstream generation workflow.
 
+Disclose material AI contribution truthfully using the repository's commit
+metadata convention. Codex contributions use
+`Co-authored-by: Codex <noreply@openai.com>`. Check the completed commit message
+as well as the staged diff. Preserve historical attribution omissions as explicit
+delivery gaps; do not rewrite shared history without authorization.
+
 Never discard or rewrite another contributor's work to simplify a task. Do not
 force-push the default or a shared branch. Rewrite a personal feature branch only
 when authorized and permitted by repository policy. Coordinate Git operations
@@ -179,12 +185,20 @@ Include success, boundary or rejection, and relevant failure outcomes; explain
 inapplicable categories. These obligations apply to all product requirements,
 including corrections discovered during development or troubleshooting.
 
-Follow any pre-existing numbering standard in the owning document or component.
-Preserve requirement `QML-001` style IDs, criterion `QML-001-AC01` style IDs,
-`QML-00` style increment IDs, and existing `D1` style architecture decision IDs.
-Extend the same scheme for new entries; do not introduce competing IDs, renumber existing
-entries, or reuse retired IDs for unrelated behavior. Preserve external references
-when reorganizing documentation.
+Follow the owning document/component numbering standard. Qt/QML requirements
+use `REQ-QML-001` style IDs, criteria `REQ-QML-001-AC01`, and delivery increments
+`INC-QML-00`; existing `D1` architecture decision IDs remain unchanged. Keep
+requirement/criterion and increment namespaces distinct. Preserve every numeric
+identity and resolve earlier shared-prefix IDs through the
+[canonical identifier/alias catalog](docs/qt-qml/IDENTIFIERS.md). Old aliases, test
+names and historical evidence remain valid. Extend the current scheme without
+competing IDs, renumbering or reuse, and preserve heading/external references.
+
+Present each requirement as its number and title, followed by the required
+observable behavior and an **Acceptance Criteria** label. Display criteria as
+`1 - criterion`, `2 - criterion`, and so on within that requirement. Retain each
+stable acceptance ID alongside its criterion for test and evidence references.
+Keep status and delivery details separate from the behavioral statement.
 
 Identify affected acceptance IDs before implementation. Update requirements,
 design, comments, tests, and traceability together when behavior changes. Do not
@@ -295,6 +309,10 @@ when they can invalidate shared analysis.
 
 Every failure exposed by development, manual, integration, or system verification
 automatically creates a regression-coverage obligation for its correction.
+Findings-only audits may retain explicit opt-in probes with failing acceptance
+assertions, provided normal discovery exclusions and execution results are recorded.
+Promote those cases into ordinary automatically collected regressions with the
+correction. An excluded or expected-failing probe cannot establish release acceptance.
 Reproduce it at the lowest faithful automated production boundary and add coverage
 that fails before the fix. Review adjacent risks: paired settings, validation order,
 retries, state transitions, persistence ordering, rollback, and diagnostics where
@@ -493,6 +511,19 @@ fact locations. Carry authoritative lexical/scope decisions separately from
 bounded display lists so sanitation cannot turn a hidden name into a resolved
 target. Cross-language exceptions need accepted endpoint role/identity evidence.
 Check direction through the actual serialized graph and each relevant consumer.
+
+For Qt reflection and connection joins, test receiver-owned members, descendant
+lookup/depth, distinct same-named engine declarations and lexical type aliases.
+Textual spelling and QML lexical visibility alone do not establish QObject member,
+engine/provider or native endpoint identity. Reject unsupported identity rather
+than binding a convenient global or enclosing declaration.
+
+Audit Qt API families by semantic mechanism and exceptional production paths.
+Use official versioned API inventories as completeness checklists; name counts,
+macro normalization and generic C++ parsing do not establish Qt semantic support.
+Record explicit support, conservative exclusions, generic-only behavior and
+unverified forms with their acceptance/evidence. Do not promise every SDK API
+merely because related source syntax is admitted.
 
 Bind evidence to source/configuration revision, parser/dependency versions, fixture
 state, platform, and actual stage under investigation. Compare cold/warm and

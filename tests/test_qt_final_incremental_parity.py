@@ -82,20 +82,26 @@ def clean(root, cache):
     return load_node_link_graph(json.loads(output.read_text(encoding="utf-8")))
 
 
-def manual_update(root, monkeypatch):
+def manual_update(root, monkeypatch, *, follow_symlinks=False):
     # Suppress only unrelated installed-skill maintenance. The actual CLI,
     # locking, extraction, resolution, persistence and update driver all run.
     monkeypatch.setattr(entrypoint, "_check_skill_version", lambda *_: None)
     monkeypatch.setattr(entrypoint, "_refresh_stale_skills", lambda: None)
-    monkeypatch.setattr(entrypoint.sys, "argv", ["graphify", "update", str(root), "--no-cluster"])
+    argv = ["graphify", "update", str(root), "--no-cluster"]
+    if follow_symlinks:
+        argv.append("--follow-symlinks")
+    monkeypatch.setattr(entrypoint.sys, "argv", argv)
     entrypoint.main()
 
 
-def run(root, monkeypatch, operation, changes=None):
+def run(root, monkeypatch, operation, changes=None, *, follow_symlinks=False):
+    # Alias-specific fixtures opt into the real supported discovery profile;
+    # ordinary fixtures keep the production default and their existing scope.
     if operation == "manual":
-        manual_update(root, monkeypatch)
+        manual_update(root, monkeypatch, follow_symlinks=follow_symlinks)
     else:
-        assert _rebuild_code(root, changed_paths=changes, no_cluster=True)
+        assert _rebuild_code(root, changed_paths=changes, no_cluster=True,
+                             follow_symlinks=follow_symlinks)
     return published(root)
 
 
@@ -175,7 +181,9 @@ def access_facts(graph):
 @pytest.mark.parametrize("operation", ["manual", "watch"])
 def test_qml017_ac04_qml_member_edit_refreshes_unchanged_reverse_cpp_access(tmp_path, monkeypatch, operation):
     source = project(tmp_path)
-    source.write_text('import Public.Tools 1.0\nService { property string title: "hello"; '
+    # The property-held QtObject needs an explicit accepted builtin import;
+    # the custom module alone cannot authorize its QObject construction type.
+    source.write_text('import Public.Tools 1.0\nimport QtQml\nService { property string title: "hello"; '
         'function refresh() { fetch() } property int observed: backend.status; '
         'property QtObject child: QtObject { objectName: "details"; property int count: 1 } }\n', encoding="utf-8")
     access = tmp_path / "access.cpp"
