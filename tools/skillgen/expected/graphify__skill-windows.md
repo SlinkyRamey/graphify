@@ -145,7 +145,9 @@ If the import succeeds, print nothing and move straight to Step 2.
 import json
 from graphify.detect import detect
 from pathlib import Path
-result = detect(Path('INPUT_PATH'))
+from graphify.paths import out_path
+from graphify.watch import _read_build_excludes, _read_build_gitignore
+result = detect(Path('INPUT_PATH'), extra_excludes=_read_build_excludes(out_path()), gitignore=_read_build_gitignore(out_path()))
 # Write the sidecar from Python, not a shell redirect, so the same block renders
 # on PowerShell hosts without console-encoding drift (#2528).
 Path('graphify-out/.graphify_detect.json').write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
@@ -205,10 +207,18 @@ Note: Parallelizing AST + semantic saves 5-15s on large corpora. AST is determin
 
 For any code files detected, run AST extraction in parallel with Part B subagents:
 
+[Qt/QML] Install the optional `graphifyy[qml]` extra in the recorded interpreter when the accepted corpus contains QML or `.qmltypes`. Analysis does not require a Qt SDK and never executes project code or build tools.
+
+[Qt/QML] Preserve scoped source identities, evidence and unresolved statuses. Bindings, signal emissions, declared connections and meta-object accesses have different meanings; an emission does not prove a synchronous slot call. QML `id` does not establish C++ `objectName` lookup.
+
+[Qt/QML] The literal CMake/qmake/QRC/type-description subset and its limits are documented in `docs/qt-qml/README.md` when available. Conditional builds, dynamic targets and unsupported syntax cannot become guessed providers. A failed integrity gate preserves prior output; do not force past it.
+
 ```powershell
 @'
 import sys, json
 from graphify.extract import collect_files, extract
+from graphify.qml_safety import require_complete_qml
+from graphify.qt_analysis_state import inspect_qt_analysis
 from pathlib import Path
 import json
 
@@ -218,7 +228,12 @@ for f in detect.get('files', {}).get('code', []):
     code_files.extend(collect_files(Path(f)) if Path(f).is_dir() else [Path(f)])
 
 if code_files:
-    result = extract(code_files, cache_root=Path('INPUT_PATH'))
+    scan_root = Path(Path('graphify-out/.graphify_root').read_text(encoding='utf-8').strip()).resolve()
+    scan_root = scan_root.parent if scan_root.is_file() else scan_root
+    qt_state = inspect_qt_analysis(scan_root, Path('graphify-out'), code_files)
+    result = extract(code_files, root=scan_root, cache_root=scan_root,
+                     qml_import_roots=qt_state.import_roots, refresh_native=qt_state.has_qt)
+    require_complete_qml(result, code_files, operation='skill AST', root=scan_root)
     Path('graphify-out/.graphify_ast.json').write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f'AST: {len(result["nodes"])} nodes, {len(result["edges"])} edges')
 else:
@@ -274,11 +289,15 @@ if cached_nodes or cached_edges or cached_hyperedges:
 else:
     Path('graphify-out/.graphify_cached.json').unlink(missing_ok=True)
 Path('graphify-out/.graphify_uncached.txt').write_text('\n'.join(uncached), encoding="utf-8")
+# Nothing has been dispatched yet, so any chunk file on disk is a leftover from an
+# interrupted run, and Step B3 merges every .graphify_chunk_*.json it finds.
+for stale in Path('graphify-out').glob('.graphify_chunk_*.json'):
+    stale.unlink()
 print(f'Cache: {len(all_files)-len(uncached)} files hit, {len(uncached)} files need extraction')
 '@ | & (Get-Content graphify-out\.graphify_python) -
 ```
 
-Only dispatch subagents for files listed in `graphify-out/.graphify_uncached.txt`. If all files are cached, skip to Part C directly.
+Only dispatch subagents for files listed in `graphify-out/.graphify_uncached.txt`. If all files are cached, skip Steps B1 and B2 but still run Step B3's commands: its merge is the only Part B step that writes `graphify-out/.graphify_semantic.json`, and Part C reads that file unconditionally. Do not write an empty `.graphify_semantic.json` instead, because that drops every cached node.
 
 **Step B1 - Split into chunks**
 
@@ -399,6 +418,18 @@ from pathlib import Path
 
 ast = json.loads(Path('graphify-out/.graphify_ast.json').read_text(encoding="utf-8"))
 sem = json.loads(Path('graphify-out/.graphify_semantic.json').read_text(encoding="utf-8"))
+
+# Stamp tier provenance on the semantic side. build._is_ast_tier reads
+# _origin when present and otherwise guesses from the SHAPE of
+# source_location ('L<line>' means AST). A subagent that writes 'L12' for a
+# doc section therefore made that node read as AST, and the next
+# graphify update deleted it along with the re-extracted code file it
+# seemed to belong to (#2843). extract() stamps its own items 'ast'; the
+# semantic side must say so explicitly.
+for n in sem['nodes']:
+    n.setdefault('_origin', 'semantic')
+for e in sem['edges']:
+    e.setdefault('_origin', 'semantic')
 
 # Merge: AST nodes first, semantic nodes deduplicated by id
 seen = {n['id'] for n in ast['nodes']}
@@ -672,6 +703,8 @@ Graph complete. Outputs in PATH_TO_DIR/graphify-out/
 If graphify saved you time, consider supporting it: https://github.com/sponsors/safishamsi
 
 Replace PATH_TO_DIR with the actual absolute path of the directory that was processed.
+
+If PATH_TO_DIR is inside a git repository, add one line to the report: `graphify-out/` was written into the working tree, so unless the repository already ignores it, it will show in `git status`; the user can add `graphify-out/` to `.gitignore`, or commit only the outputs their team should share (see https://docs.graphify.com/guides/team-workflows).
 
 Then paste these sections from GRAPH_REPORT.md directly into the chat:
 - God Nodes
